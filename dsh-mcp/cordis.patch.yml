@@ -1,0 +1,10 @@
+# @flg1217/dsh-mcp bundle patch: inserts the shared MCP server row into the
+# web profile roster. Applied as a profile bundle layer (the `dsh.bundle.patch`
+# manifest field) over dsh-base.
+#
+# 零配置基础设施插件:作为 codebuddy / agy 桥插件的依赖被自动安装;
+# `dsh plugin add` 的 reconcile 会因本包的 `dsh.bundle` 声明把它自动加入
+# profile 的 bundles 层栈——用户无需单独安装/配置。
+- insert:
+    - id: dsh-mcp
+      name: '@flg1217/dsh-mcp'
