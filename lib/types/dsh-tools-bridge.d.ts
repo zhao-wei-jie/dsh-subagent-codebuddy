@@ -42,6 +42,19 @@ export declare const BRIDGE_TOOL_PREFIX = "dsh_";
  * 让镜像统一叫 `cli_read`,与真工具彻底分名,桥照旧解析真 `read`。
  */
 export declare const CLI_MIRROR_TOOL_PREFIX = "cli_";
+/**
+ * 按名字隐藏某些 dsh 工具,不让它们进下发给 CLI 的工具面。
+ *
+ * 场景:CLI 自带同名能力时(如 CodeBuddy 原生 `WebSearch`),dsh 的 `web_search`
+ * 若同时以 `mcp__dsh__web_search` 出现,模型会在两个等价工具间随机选;选到 dsh
+ * 那个就消耗另一套 key/额度,且结果形态不同。桥插件按自己的设置排除。
+ *
+ * `delegate` 通道(dsh_ 前缀)与 MCP 通道共用同一份排除名单,避免两条通道口径
+ * 不一致(切模式后工具又冒出来)。
+ * @param source - 要隐藏的工具原名,或返回它的 thunk(现取,支持热改配置)。
+ * @returns 释放函数,只移除自己这一条源。
+ */
+export declare function excludeDshMcpTools(source: readonly string[] | (() => readonly string[])): () => void;
 /** dsh 工具名 → 桥工具 id。 */
 export declare function bridgeToolId(name: string): string;
 /** 桥工具 id → dsh 工具名;非桥命名、ptc 保留名、MCP 或 CLI 镜像名时返回 undefined。 */

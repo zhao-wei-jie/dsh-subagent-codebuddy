@@ -20,6 +20,7 @@ export {
   bridgeTargetTool,
   bridgeToolId,
   CLI_MIRROR_TOOL_PREFIX,
+  excludeDshMcpTools,
   isBridgeEligible,
   listDshBridgeTools,
   listDshMcpTools,

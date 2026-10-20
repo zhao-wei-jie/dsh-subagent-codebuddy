@@ -13,8 +13,10 @@ import {
   BRIDGE_TOOL_PREFIX,
   bridgeTargetTool,
   bridgeToolId,
+  excludeDshMcpTools,
   isBridgeEligible,
   listDshBridgeTools,
+  listDshMcpTools,
   runDshBridgeTool,
 } from '../src/dsh-tools-bridge.ts'
 
@@ -291,5 +293,75 @@ describe('blocksToMcpContent:图片经 MCP content 回传', () => {
       { type: 'image', attachment: { mediaType: 'image/png' } },
     ])
     expect(parts).toBeUndefined()
+  })
+})
+
+/**
+ * 排除机制:CLI 自带同名能力时(CodeBuddy 的 WebSearch),桥插件把 dsh 的
+ * 同名工具藏起来,避免模型在两个等价工具间随机选、消耗另一套额度。
+ *
+ * 排除源是模块级状态,每个用例必须自己 `dispose()`,否则污染后续用例。
+ */
+describe('excludeDshMcpTools:按调用方设置隐藏工具', () => {
+  const PARENT = { id: 'parent-1' } as never
+  const schemas = () => [
+    { name: 'web_search', description: 'dsh 搜索', parameters: {} },
+    { name: 'web_fetch', description: 'dsh 抓页', parameters: {} },
+    { name: NATIVE_SHELL, description: 'shell', parameters: {} },
+  ]
+
+  it('排除后两条通道都不再下发该工具,释放即恢复', () => {
+    const { ctx } = makeBridgeCtx({ schemas: schemas() })
+    expect(listDshMcpTools(ctx, PARENT).map(tool => tool.name)).toContain('web_search')
+
+    const dispose = excludeDshMcpTools(['web_search'])
+    const mcpNames = listDshMcpTools(ctx, PARENT).map(tool => tool.name)
+    expect(mcpNames).not.toContain('web_search')
+    // 只藏点名的那个:同族工具与 shell 不受牵连。
+    expect(mcpNames).toContain('web_fetch')
+    expect(mcpNames).toContain(NATIVE_SHELL)
+    // delegate 通道同口径(切桥模式后工具不会又冒出来)。
+    expect(listDshBridgeTools(ctx, PARENT).map(tool => tool.id)).not.toContain('dsh_web_search')
+
+    dispose()
+    expect(listDshMcpTools(ctx, PARENT).map(tool => tool.name)).toContain('web_search')
+  })
+
+  it('thunk 源现取:开关从关到开,下一次 list 立即反映', () => {
+    const { ctx } = makeBridgeCtx({ schemas: schemas() })
+    let enabled = false
+    const dispose = excludeDshMcpTools(() => (enabled ? ['web_search'] : []))
+    expect(listDshMcpTools(ctx, PARENT).map(tool => tool.name)).toContain('web_search')
+    enabled = true
+    expect(listDshMcpTools(ctx, PARENT).map(tool => tool.name)).not.toContain('web_search')
+    dispose()
+  })
+
+  it('多源累积:释放一个源不影响另一个源的排除', () => {
+    const { ctx } = makeBridgeCtx({ schemas: schemas() })
+    const disposeA = excludeDshMcpTools(['web_search'])
+    const disposeB = excludeDshMcpTools(['web_fetch'])
+    expect(listDshMcpTools(ctx, PARENT).map(tool => tool.name)).not.toContain('web_search')
+    expect(listDshMcpTools(ctx, PARENT).map(tool => tool.name)).not.toContain('web_fetch')
+    disposeB()
+    expect(listDshMcpTools(ctx, PARENT).map(tool => tool.name)).not.toContain('web_search')
+    expect(listDshMcpTools(ctx, PARENT).map(tool => tool.name)).toContain('web_fetch')
+    disposeA()
+  })
+
+  it('排除源抛错不拖垮工具面(整个列表变空比多暴露一个工具更糟)', () => {
+    const { ctx } = makeBridgeCtx({ schemas: schemas() })
+    const dispose = excludeDshMcpTools(() => { throw new Error('配置读取失败') })
+    const names = listDshMcpTools(ctx, PARENT).map(tool => tool.name)
+    expect(names).toContain('web_search')
+    expect(names).toContain('web_fetch')
+    dispose()
+  })
+
+  it('大小写与空白不敏感(配置里写 Web_Search、带空格都算命中)', () => {
+    const { ctx } = makeBridgeCtx({ schemas: schemas() })
+    const dispose = excludeDshMcpTools(['  Web_Search  '])
+    expect(listDshMcpTools(ctx, PARENT).map(tool => tool.name)).not.toContain('web_search')
+    dispose()
   })
 })
