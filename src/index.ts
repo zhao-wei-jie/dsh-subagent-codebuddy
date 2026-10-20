@@ -29,7 +29,7 @@ import { registerCodebuddyModelsTool } from './models.js'
 import { registerCodebuddySettings, resolveSpawnableCommand } from './settings.js'
 import type { EffectiveCodebuddySettings } from './settings.js'
 import { registerCodebuddyModelsRoute } from './models-route.js'
-import { registerDshMcpServer } from '@flg1217/dsh-mcp'
+import { excludeDshMcpTools, registerDshMcpServer } from '@flg1217/dsh-mcp'
 import { sweepStaleMcpConfigs } from './mcp-config.js'
 import { installModelSwitchToolGuide } from './tool-guide.js'
 import type {} from '@deepseek-ai/dsh-settings'
@@ -173,6 +173,14 @@ export function apply(ctx: Context, config: Config): void {
   // 共享包 / llm-agy / 本插件同时调用时只有第一个生效,key 不会被覆盖。
   // 用 ctx.effect 接管释放函数:插件卸载/热重载时摘掉路由并作废端点 key。
   ctx.effect(() => registerDshMcpServer(ctx))
+  // 放行 CodeBuddy 原生 WebSearch 时,把 dsh 的 `web_search` 从桥工具面里隐藏:
+  // 两个等价搜索工具并存会让模型随机选,选到 dsh 那个就消耗另一套 key/额度,
+  // 结果形态也不同。只隐藏 `web_search`——`web_fetch` 是唯一能抓网页的路径,
+  // 且 CLI 侧的 WebFetch 没放行,不构成竞争。
+  // thunk 现取:面板改开关后下一次 tools/list 即反映,不必重启 dsh。
+  ctx.effect(() => excludeDshMcpTools(
+    () => (config.enableWebSearch.get() ? ['web_search'] : []),
+  ))
   // 清扫陈旧的 --mcp-config 文件(本插件方言:文件名含会话+内容摘要、只增不删)。
   sweepStaleMcpConfigs()
   // 路由在 CodeBuddy 与 dsh 原生之间切换时,注入工具面说明(核心只注入

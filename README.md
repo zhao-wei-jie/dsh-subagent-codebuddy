@@ -26,7 +26,9 @@
 （spawn 传 `--tools ""`；delegate 模式只放行委托工具合成器 `DelegateTool`，见 §三「工具桥」）。
 例外是设置页「联网搜索(WebSearch)」开关（配置项 `enableWebSearch`，默认关）：
 开启后该工具进入当前 `--tools` 白名单，由 CodeBuddy 在自己的进程内直连其服务端执行。
-因此：
+同时插件会通过 `excludeDshMcpTools(['web_search'])` 把 dsh 的 `web_search` 从桥工具面
+隐藏——两个等价搜索并存会让模型随机选，选到 dsh 那个就消耗另一套 key/额度。
+`web_fetch` 不隐藏（CLI 侧的 WebFetch 没放行，不构成竞争）。因此：
 
 - 模型的全部工具面 = dsh 侧工具（MCP 模式下是 `mcp__dsh__bash` / `mcp__dsh__edit`
   / `mcp__dsh__read_image` …，delegate 模式下是 `dsh_bash` / `dsh_edit` …）。这些调用
