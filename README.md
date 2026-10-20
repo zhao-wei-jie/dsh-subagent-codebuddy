@@ -22,8 +22,10 @@
 | **opt-in 工具** | `subagent_codebuddy` + `list_codebuddy_models`（`registerSubagentTools: true` 开启；默认关闭，推荐通用工具） |
 | **压缩归属** | codebuddy 会话的压缩由 **CLI 负责**（dsh 的自动压缩被插件接管，不压镜像）；CLI 压完之后镜像成 dsh 的标准压缩卡，**零 token**（见 §三「压缩归属」） |
 
-**语义说明（主代理轮，重要）**：ACP CLI 自带 agent 循环，但它的**内置工具已全部禁用**
+**语义说明（主代理轮，重要）**：ACP CLI 自带 agent 循环，但它的**内置工具默认全部禁用**
 （spawn 传 `--tools ""`；delegate 模式只放行委托工具合成器 `DelegateTool`，见 §三「工具桥」）。
+例外是设置页「联网搜索(WebSearch)」开关（配置项 `enableWebSearch`，默认关）：
+开启后该工具进入当前 `--tools` 白名单，由 CodeBuddy 在自己的进程内直连其服务端执行。
 因此：
 
 - 模型的全部工具面 = dsh 侧工具（MCP 模式下是 `mcp__dsh__bash` / `mcp__dsh__edit`
@@ -36,7 +38,12 @@
 > 为什么全禁而不是白名单（2026-09-18）：CLI 原生工具要进 dsh 会话，必须在会话 scope 注册
 > 「回放镜像」承接；镜像注册一旦丢失，该会话的原生调用就永久报 `unknown tool "cli_read"`
 > （偶发、不可复现）。全禁后这条路径不再被触发。
-> 逃生口：`extraArgs` 排在 `--tools` 之后，可用 `extraArgs: ['--tools', 'Read']` 覆盖本策略。
+> 个别放行（推荐）：设置页「联网搜索(WebSearch)」开关 → 配置项 `enableWebSearch: true`，
+> 由 `cliToolPolicyArgs(bridgeMode, nativeTools)` 拼装 `--tools`——`--tools` 是**全量白名单**，
+> 所以 delegate 模式下 `DelegateTool` 会自动补回；MCP 工具不经该判定，无需列出。
+> 只适合只读工具：放行项在 CLI 进程内执行，**不经 dsh 审批/沙箱**，只留一条回放结果。
+> 逃生口（不推荐）：`extraArgs` 排在 `--tools` 之后，可用 `extraArgs: ['--tools', 'Read']`
+> 覆盖本策略——但它会连 `DelegateTool` 一起顶掉，且绕过本节的拼装逻辑。
 > 历史注记：更早的版本让 CLI 用自己的工具链、dsh 沙箱不参与——**安全模型以本节为准**。
 
 ## 二、快速开始
@@ -127,7 +134,9 @@ node scripts/link-profile.mjs            # 默认装配进 web profile
 
 ### 工具桥（MCP / delegate）
 
-CLI 内置工具已全部禁用（`--tools ""`，见 §一「语义说明」），模型的一切能力必须由 dsh 提供。
+CLI 内置工具默认全禁（`--tools ""`，见 §一「语义说明」），模型的能力默认全部由 dsh 提供。
+设置页开启「联网搜索(WebSearch)」后，`--tools` 变成 `WebSearch`（delegate 模式为
+`DelegateTool,WebSearch`）：该工具的调用由 CLI 就地执行，其余能力仍走 dsh。
 插件把**当前会话可见的 dsh 工具**暴露给 CLI，两条通道：
 
 | | `mcp`（默认） | `delegate`（回退） |

@@ -5,7 +5,7 @@
  * - 超长 prompt 内联返回(经 ACP stdin 发送,无命令行长度限制)。
  */
 import { describe, expect, it, vi } from 'vitest'
-import { buildPrompt, lastUserPrompt, resumeReplayPrompt } from '../src/serialize.ts'
+import { buildPrompt, lastUserPrompt, resumeReplayPrompt, systemInstructionsText } from '../src/serialize.ts'
 import type { Message } from '@deepseek-ai/dsh-llm'
 
 /** 伪附件服务:readImage 返回图片字节与媒体类型。 */
@@ -399,5 +399,35 @@ describe('resumeReplayPrompt:补发完整性(tool-call / 压缩 / own 过滤)', 
     expect(replay.prompt).toContain('新问题')
     expect(replay.prompt).not.toContain('own 的回答')
     expect(replay.prompt).not.toContain('期间穿插的 own 回答')
+  })
+})
+
+describe('systemInstructionsText:工具路由说明', () => {
+  it('默认(未放行原生工具)说"全部禁用"', () => {
+    const text = systemInstructionsText('SYS', false, 'mcp')
+    expect(text).toContain('全部禁用')
+    expect(text).toContain('mcp__dsh__bash')
+    // 未放行时不应出现放行措辞,否则模型会以为原生工具可用。
+    expect(text).not.toContain('只有')
+  })
+
+  it('放行 WebSearch 后改写措辞:只声明它可用,其余仍禁用', () => {
+    const text = systemInstructionsText('SYS', false, 'mcp', ['WebSearch'])
+    expect(text).toContain('只有 WebSearch 可用')
+    expect(text).toContain('其余原生工具')
+    expect(text).not.toContain('已**全部禁用**')
+    // dsh 侧路由目标必须保留(否则模型失去工具名指引)。
+    expect(text).toContain('mcp__dsh__pwsh')
+  })
+
+  it('去重去空白;delegate 模式用 dsh_ 前缀', () => {
+    const text = systemInstructionsText('SYS', false, 'delegate', [' WebSearch ', 'WebSearch'])
+    expect(text).toContain('只有 WebSearch 可用')
+    expect(text).toContain('dsh_pwsh')
+  })
+
+  it('updated 时仍带"以本版为准"抬头', () => {
+    const text = systemInstructionsText('SYS', true, 'mcp', ['WebSearch'])
+    expect(text).toContain('以本版为准')
   })
 })

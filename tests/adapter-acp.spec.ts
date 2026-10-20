@@ -368,6 +368,18 @@ describe('adapter(ACP):取消与错误', () => {
     // 漏掉它 = 全部 dsh_* 委托工具不可见)。
     expect(cliToolPolicyArgs('delegate')).toEqual(['--tools', 'DelegateTool'])
   })
+
+  it('cliNativeTools 放行:白名单累加、delegate 补 DelegateTool、去重去空', () => {
+    // --tools 是全量白名单:放行项即最终名单(mcp 模式 MCP 工具不经该判定)。
+    expect(cliToolPolicyArgs('mcp', ['WebSearch'])).toEqual(['--tools', 'WebSearch'])
+    expect(cliToolPolicyArgs('mcp', ['WebSearch', 'WebFetch'])).toEqual(['--tools', 'WebSearch,WebFetch'])
+    // delegate 模式的 DelegateTool 不能丢:丢了全部 dsh_* 委托工具消失。
+    expect(cliToolPolicyArgs('delegate', ['WebSearch'])).toEqual(['--tools', 'DelegateTool,WebSearch'])
+    // 去重 + 去空白:非法值会让 CLI 直接抛 Invalid --tools value。
+    expect(cliToolPolicyArgs('mcp', [' WebSearch ', 'WebSearch', '  '])).toEqual(['--tools', 'WebSearch'])
+    // 空列表回落全禁策略(与未配置时逐字一致)。
+    expect(cliToolPolicyArgs('mcp', [])).toEqual(['--tools', ''])
+  })
 })
 
 describe('usageOfUpdate:usage_update → dsh TokenUsage', () => {

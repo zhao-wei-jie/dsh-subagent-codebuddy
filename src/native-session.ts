@@ -89,6 +89,9 @@ function messageText(message: RequestMessage): string {
  * @param messages - 折叠视图的消息序列(压缩后的原始历史不会在这里出现)。
  * @param context - 会话 id 与工作目录。
  * @param images - 图片读取面(缺省时图片退化为 `[图片]` 文本占位)。
+ * @param system - dsh 的 system prompt(作为首条记录写入)。
+ * @param bridgeMode - 桥接模式(决定工具路由说明里的 dsh 工具前缀)。
+ * @param nativeTools - 已放行的 CLI 内置工具名(与 spawn 的 --tools 一致)。
  * @returns 记录数组(按时间顺序,可直接写 JSONL)。
  */
 export async function messagesToRecords(
@@ -97,6 +100,7 @@ export async function messagesToRecords(
   images?: NativeSessionImages,
   system?: string,
   bridgeMode: 'mcp' | 'delegate' = 'delegate',
+  nativeTools: readonly string[] = [],
 ): Promise<NativeRecord[]> {
   const records: NativeRecord[] = []
   const toolNames = new Map<string, string>()
@@ -125,7 +129,7 @@ export async function messagesToRecords(
       timestamp: stamp(),
       type: 'message',
       role: 'user',
-      content: [{ type: 'input_text', text: systemInstructionsText(system, false, bridgeMode) }],
+      content: [{ type: 'input_text', text: systemInstructionsText(system, false, bridgeMode, nativeTools) }],
       __codebuddyLocal: { sensitiveUserInputReviewed: true },
       providerData: { agent: 'cli' },
       ...base(),

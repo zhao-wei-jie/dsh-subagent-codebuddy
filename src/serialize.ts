@@ -18,18 +18,28 @@ export const CONTINUE_PROMPT = '继续完成之前未完成的任务,持续推�
 /**
  * 工具路由说明(附在 system instructions 末尾)。
  *
- * 与 spawn 的 --tools 策略(acp.ts cliToolPolicyArgs:内置工具全禁)配套:
+ * 与 spawn 的 --tools 策略(acp.ts cliToolPolicyArgs)配套:
  * 告诉模型原生工具一律不可用、对等能力走哪套 dsh 名字。放在 system 位置
  * (权威)而不是只靠每条 prompt 尾注——CLI 内置提示词在 user 位置的指令
  * 面前占优,实测尾注拦不住模型直调原生 Bash/Edit。
+ *
+ * `nativeTools` 非空时必须改写措辞:设置页放行了少数内置工具(如 WebSearch),
+ * 仍说"全部禁用"会与工具面事实矛盾,模型要么不敢用、要么按旧指令绕开。
  */
-function toolRoutingNote(bridgeMode: 'mcp' | 'delegate'): string {
+function toolRoutingNote(
+  bridgeMode: 'mcp' | 'delegate',
+  nativeTools: readonly string[] = [],
+): string {
   const target = bridgeMode === 'mcp'
     ? '对等能力一律用 MCP 工具(mcp__dsh__bash、mcp__dsh__pwsh、mcp__dsh__read、mcp__dsh__read_image、mcp__dsh__edit、mcp__dsh__write、mcp__dsh__glob、mcp__dsh__grep)'
     : '对等能力一律用 dsh 前缀版本(dsh_bash、dsh_pwsh、dsh_read、dsh_read_image、dsh_edit、dsh_write、dsh_glob、dsh_grep)'
+  const enabled = [...new Set(nativeTools.map(tool => tool.trim()).filter(tool => tool.length > 0))]
+  const clause = enabled.length === 0
+    ? 'CLI 原生工具(含 Bash/PowerShell/Read/Edit/Write/NotebookEdit/Glob/Grep)已**全部禁用**'
+    : `CLI 原生工具中**只有 ${enabled.join('、')} 可用**(由 CodeBuddy 直连其服务端执行,不产生 dsh 工具事件、不占 dsh 审批);其余原生工具(含 Bash/PowerShell/Read/Edit/Write/NotebookEdit/Glob/Grep)已**禁用**`
   return [
     '[工具路由(本环境强制)]',
-    `CLI 原生工具(含 Bash/PowerShell/Read/Edit/Write/NotebookEdit/Glob/Grep)已**全部禁用**:${target}——它们在 dsh 侧执行,受审批/沙箱约束,进会话日志与后台任务面板;调用不存在的原生工具会失败,不要换别的方式绕过。读图片用 read_image:结果以图片卡片呈现给用户,并作为图片进入你的上下文。`,
+    `${clause}:${target}——它们在 dsh 侧执行,受审批/沙箱约束,进会话日志与后台任务面板;调用不存在的原生工具会失败,不要换别的方式绕过。读图片用 read_image:结果以图片卡片呈现给用户,并作为图片进入你的上下文。`,
   ].join('\n')
 }
 
@@ -41,16 +51,20 @@ function toolRoutingNote(bridgeMode: 'mcp' | 'delegate'): string {
  * (见 adapter 的 systemHash),重复发送时不加标题会让模型当成两条并行指令。
  * @param system - system prompt 全文。
  * @param updated - 是否是对已发过版本的更新(内容变了才为 true)。
+ * @param bridgeMode - 桥接模式(决定 dsh 侧工具命名前缀)。
+ * @param nativeTools - 已放行的 CLI 内置工具名(与 spawn 的 --tools 保持一致;
+ *   两者不一致会让模型拿到互相矛盾的指令)。
  */
 export function systemInstructionsText(
   system: string,
   updated = false,
   bridgeMode: 'mcp' | 'delegate' = 'delegate',
+  nativeTools: readonly string[] = [],
 ): string {
   const header = updated
     ? 'System instructions (updated — 以本版为准,忽略早前版本):'
     : 'System instructions:'
-  return `${header}\n${system}\n\n${toolRoutingNote(bridgeMode)}`
+  return `${header}\n${system}\n\n${toolRoutingNote(bridgeMode, nativeTools)}`
 }
 
 /** 序列化结果:prompt 文本 + ACP 原生图片内容块(base64)。 */

@@ -46,6 +46,8 @@ export interface CodebuddyConfigInput {
   permissionMode?: string
   registerSubagentTools?: boolean
   bridgeMode?: 'mcp' | 'delegate'
+  /** 放行 CodeBuddy 内置 WebSearch(设置页开关)。 */
+  enableWebSearch?: boolean
   extraArgs?: string[]
   providerName?: string
   toolName?: string
@@ -72,6 +74,18 @@ export interface Config {
   registerSubagentTools: Volatile<boolean>
   /** 工具桥接模式(默认 `mcp`)。 */
   bridgeMode: Volatile<'mcp' | 'delegate'>
+  /**
+   * 放行 CodeBuddy 内置 `WebSearch`(设置页开关;**默认关 = 内置工具全禁**)。
+   *
+   * 只读、无副作用的工具才适合放行:它在 CodeBuddy 进程内直连其服务端执行,
+   * 绕过 dsh 的审批/沙箱,也不产生 dsh 工具事件(只留一条 `cli_web_search`
+   * 回放结果)。`--tools` 是全量白名单,本项与 `DelegateTool` 由
+   * `cliToolPolicyArgs` 拼装,不要在 `extraArgs` 里重复写 `--tools`。
+   *
+   * 用 boolean 而非工具名数组:与 {@link registerSubagentTools} 同构(已验证的
+   * volatile 形态);要再加放行项时按同样方式补一个布尔开关。
+   */
+  enableWebSearch: Volatile<boolean>
   /** 追加的额外 CodeBuddy 参数。 */
   extraArgs: string[]
   /** LLM provider 路由名,默认 `codebuddy`。 */
@@ -128,6 +142,8 @@ export const Config: z<CodebuddyConfigInput, Config> = z.object({
     .description('提供旧版自定义委派工具(subagent_codebuddy / list_codebuddy_models);默认关闭,推荐用通用 subagent 工具 + 模型选择').volatile(),
   bridgeMode: z.union([z.const('mcp'), z.const('delegate')]).default('mcp')
     .description('工具桥接模式:mcp=dsh 提供 HTTP MCP server(完整 schema,推荐);delegate=旧 DelegateTool 通道(回退用)').volatile(),
+  enableWebSearch: z.boolean().default(false)
+    .description('放行 CodeBuddy 内置 WebSearch(联网搜索);默认关闭——它在 CodeBuddy 进程内执行,不经 dsh 审批/沙箱,也不进 dsh 工具事件').volatile(),
   extraArgs: z.array(z.string()).default([]),
   providerName: z.string().default('codebuddy'),
   toolName: z.string().default('subagent_codebuddy'),
@@ -161,7 +177,10 @@ export function apply(ctx: Context, config: Config): void {
   sweepStaleMcpConfigs()
   // 路由在 CodeBuddy 与 dsh 原生之间切换时,注入工具面说明(核心只注入
   // "模型变了";工具面差异不注入,切后的第一步就会按旧习惯选错工具)。
-  installModelSwitchToolGuide(ctx)
+  // 放行原生工具(设置页开关)会改变工具面,故说明文本按当前开关现取。
+  const nativeToolsOf = (): readonly string[] =>
+    config.enableWebSearch.get() ? ['WebSearch'] : []
+  installModelSwitchToolGuide(ctx, nativeToolsOf)
 
   // opt-in 工具的注册状态:设置面板开关实时同步(开 → 注册,关 → 注销)。
   let toolCtx: Context | undefined
@@ -196,6 +215,8 @@ export function apply(ctx: Context, config: Config): void {
     permissionMode: eff.permissionMode,
     extraArgs: config.extraArgs,
     bridgeMode: eff.bridgeMode,
+    // 放行的 CLI 内置工具(设置页开关):thunk 现取,面板改动对下次 spawn 生效。
+    nativeToolsOf,
     store: conversations,
     // 静默长工具硬顶(分钟 → 毫秒;0 = 关闭)。看门狗超顶时 cancel+强杀,走
     // stall 重试自动续跑——防止 CLI 卡死时进程泄漏、子会话回合悬空。

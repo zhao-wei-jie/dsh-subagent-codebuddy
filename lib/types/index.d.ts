@@ -27,6 +27,8 @@ export interface CodebuddyConfigInput {
     permissionMode?: string;
     registerSubagentTools?: boolean;
     bridgeMode?: 'mcp' | 'delegate';
+    /** 放行 CodeBuddy 内置 WebSearch(设置页开关)。 */
+    enableWebSearch?: boolean;
     extraArgs?: string[];
     providerName?: string;
     toolName?: string;
@@ -52,6 +54,18 @@ export interface Config {
     registerSubagentTools: Volatile<boolean>;
     /** 工具桥接模式(默认 `mcp`)。 */
     bridgeMode: Volatile<'mcp' | 'delegate'>;
+    /**
+     * 放行 CodeBuddy 内置 `WebSearch`(设置页开关;**默认关 = 内置工具全禁**)。
+     *
+     * 只读、无副作用的工具才适合放行:它在 CodeBuddy 进程内直连其服务端执行,
+     * 绕过 dsh 的审批/沙箱,也不产生 dsh 工具事件(只留一条 `cli_web_search`
+     * 回放结果)。`--tools` 是全量白名单,本项与 `DelegateTool` 由
+     * `cliToolPolicyArgs` 拼装,不要在 `extraArgs` 里重复写 `--tools`。
+     *
+     * 用 boolean 而非工具名数组:与 {@link registerSubagentTools} 同构(已验证的
+     * volatile 形态);要再加放行项时按同样方式补一个布尔开关。
+     */
+    enableWebSearch: Volatile<boolean>;
     /** 追加的额外 CodeBuddy 参数。 */
     extraArgs: string[];
     /** LLM provider 路由名,默认 `codebuddy`。 */

@@ -166,6 +166,11 @@ export interface CodebuddyAdapterOptions {
    * HTTP MCP server;delegate = 旧 DelegateTool 通道(不加该参数)。
    */
   bridgeMode?: 'mcp' | 'delegate'
+  /**
+   * 额外放行的 CLI 内置工具名(设置页开关;空 = 内置工具全禁)。
+   * thunk:每次 spawn 与每次 system 说明渲染都现取,面板改动即时生效。
+   */
+  nativeToolsOf?: () => readonly string[]
   /** 动态空闲超时预算(可选,默认见 {@link DEFAULT_ACP_RUN_TIMEOUTS})。 */
   timeouts?: AcpTimeouts
   /** 静默失败自动重试次数(默认 2:首次 + 1 次续跑)。 */
@@ -354,7 +359,12 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       // system prompt 变了(或这个会话还从未发过):整份补发一次,模型由此拿到
       // 最新的 dsh 侧纪律(优先用 dsh_* 工具等)。
       if (system !== undefined && system.trim().length > 0 && record.systemHash !== systemHash) {
-        const block = systemInstructionsText(system, record.systemHash !== undefined, this.options.bridgeMode ?? 'delegate')
+        const block = systemInstructionsText(
+          system,
+          record.systemHash !== undefined,
+          this.options.bridgeMode ?? 'delegate',
+          this.options.nativeToolsOf?.() ?? [],
+        )
         prompt = `${block}\n\n${prompt}`
       }
       resume = { acpId: record.acpId }
@@ -388,6 +398,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       prefixArgs: this.options.prefixArgs,
       extraArgs: this.options.extraArgs,
       ...(this.options.bridgeMode === undefined ? {} : { bridgeMode: this.options.bridgeMode }),
+      ...(this.options.nativeToolsOf === undefined ? {} : { nativeToolsOf: this.options.nativeToolsOf }),
       ...options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) },
       ...this.options.timeouts === undefined ? {} : { timeouts: this.options.timeouts },
       ...this.options.maxAttempts === undefined ? {} : { maxAttempts: this.options.maxAttempts },
@@ -471,6 +482,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
         // dsh 的 system prompt 作为首条记录进 CLI 历史(对齐 dsh 原生行为)。
         options.system,
         this.options.bridgeMode ?? 'delegate',
+        this.options.nativeToolsOf?.() ?? [],
       )
       if (records.length === 0) return undefined
       return { sessionId, file: conversationFilePath(sessionId, cwd, this.options.nativeBaseDir), records }
@@ -748,7 +760,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
           model,
           ...effortArgs,
           '--dangerously-skip-permissions',
-          ...cliToolPolicyArgs(this.options.bridgeMode),
+          ...cliToolPolicyArgs(this.options.bridgeMode, this.options.nativeToolsOf?.() ?? []),
           ...mcpConfigArgs(this.options.bridgeMode, dshSessionId),
           ...this.options.extraArgs,
         ],

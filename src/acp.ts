@@ -65,9 +65,27 @@ export const DEFAULT_ACP_RUN_TIMEOUTS = {
  *
  * 版本升级若新增内置工具:默认不可见(比"漏禁"安全),不再逐个维护白名单。
  * 逃生口:用户 `extraArgs` 排在 `--tools` 之后,可用 `--tools Read` 覆盖本策略。
+ *
+ * **逐项放行(设置页开关,`cliNativeTools`)**:`--tools` 是全量白名单而不是
+ * 增量黑名单——CLI 侧 `createIsEnabledChecker` 对每个工具做 `split(',')` 精确
+ * 匹配,不匹配即 `isEnabled=false`。所以放行一个内置工具时必须把仍要保留的
+ * 名字一并列出(delegate 模式的 `DelegateTool` 尤其不能漏,漏了全部桥工具消失)。
+ * MCP 工具不在该判定内(`--tools ''` 时 `mcp__dsh__*` 仍可调用,见 CLI 日志),
+ * 故不需要列进来。
+ * @param bridgeMode - 桥接模式(delegate 恒带 `DelegateTool`)。
+ * @param nativeTools - 额外放行的 CLI 内置工具名(空 = 维持全禁策略)。
  */
-export function cliToolPolicyArgs(bridgeMode: 'mcp' | 'delegate' | undefined = 'mcp'): string[] {
-  return ['--tools', bridgeMode === 'delegate' ? 'DelegateTool' : '']
+export function cliToolPolicyArgs(
+  bridgeMode: 'mcp' | 'delegate' | undefined = 'mcp',
+  nativeTools: readonly string[] = [],
+): string[] {
+  // 去重 + 去空:配置里的重复项/空白项会变成非法 --tools 值,这里先收敛。
+  const extra = [...new Set(nativeTools.map(tool => tool.trim()).filter(tool => tool.length > 0))]
+  if (extra.length === 0) {
+    return ['--tools', bridgeMode === 'delegate' ? 'DelegateTool' : '']
+  }
+  const names = bridgeMode === 'delegate' ? ['DelegateTool', ...extra] : extra
+  return ['--tools', names.join(',')]
 }
 
 /** 动态空闲超时预算(测试注入小值压缩时间)。 */

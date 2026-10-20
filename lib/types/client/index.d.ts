@@ -131,6 +131,8 @@ window.__ModuleLoader__.load({
       const [legacyTools, setLegacyTools] = react.useState(false)
       // 工具桥接模式:MCP(默认)开 / delegate 旧通道关。
       const [mcpBridge, setMcpBridge] = react.useState(true)
+      // 放行 CodeBuddy 内置 WebSearch(默认关;--tools 全量白名单由服务端拼装)。
+      const [webSearch, setWebSearch] = react.useState(false)
 
       // 初始值与明细:走 settings.describe(结构化、经网关校验;不走 discoverModels,
       // 避免响应 schema 校验失败导致解析出垃圾值)。
@@ -142,6 +144,7 @@ window.__ModuleLoader__.load({
           setSavedModel(model)
           setLegacyTools(v.registerSubagentTools === true)
           setMcpBridge(v.bridgeMode !== 'delegate')
+          setWebSearch(v.enableWebSearch === true)
           setDetailText(`命令:${v.command ?? 'codebuddy'} | 权限:${v.permissionMode ?? 'bypassPermissions'} | 工具桥:${v.bridgeMode === 'delegate' ? 'delegate' : 'mcp'}`)
         } catch { /* 忽略 */ }
       }, [scope])
@@ -198,6 +201,18 @@ window.__ModuleLoader__.load({
         } catch { /* 写失败回读还原 */ }
         loadConfig()
       }, [mcpBridge, scope, loadConfig])
+
+      // 放行内置 WebSearch:开 = set(true),关 = unset(回落 schema 默认 false)。
+      // 与「旧版子代理工具」同款写法(boolean volatile 是已验证的形态)。
+      const toggleWebSearch = react.useCallback(async () => {
+        const next = !webSearch
+        setWebSearch(next)
+        try {
+          if (next) await scope.set('enableWebSearch', true)
+          else await scope.unset('enableWebSearch')
+        } catch { /* 写失败回读还原 */ }
+        loadConfig()
+      }, [webSearch, scope, loadConfig])
 
       // 手动输入:输入时只更新本地,失焦提交;与已保存值一致时跳过。
       const onModelInput = react.useCallback((e) => setCurrentModel(e.target.value), [])
@@ -282,6 +297,20 @@ window.__ModuleLoader__.load({
             ),
             react.createElement('p', { className: C.hint },
               'MCP:dsh 起 HTTP MCP server,CLI 每回合连接,工具以 mcp__dsh__<工具名> 呈现(完整 schema,推荐)。delegate:旧 DelegateTool 通道(dsh_<工具名>,回退用)。切换对新回合生效。'),
+          ),
+
+          // 放行 CodeBuddy 内置 WebSearch(联网搜索;默认关)
+          react.createElement('div', { className: C.field },
+            react.createElement('div', { className: C.fieldHead },
+              react.createElement('span', { className: C.label }, '联网搜索(WebSearch)'),
+              react.createElement(Button, {
+                size: 'sm',
+                variant: webSearch ? undefined : 'ghost',
+                onClick: toggleWebSearch,
+              }, webSearch ? '已开启(点按关闭)' : '已关闭(点按开启)'),
+            ),
+            react.createElement('p', { className: C.hint },
+              '开启后 CodeBuddy 可用它自己的 WebSearch(走 CodeBuddy 账号与服务端搜索接口,不消耗 dsh 的搜索 key)。它在 CodeBuddy 进程内执行:不经 dsh 审批/沙箱,也不产生 dsh 工具事件,只在会话里留下一条回放结果。默认关闭——开启的前提是你接受这一点,且账号搜索额度可用。对下一个 CodeBuddy 回合生效。'),
           ),
 
           // 安装命令

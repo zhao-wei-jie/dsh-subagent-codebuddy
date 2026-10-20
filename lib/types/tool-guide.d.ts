@@ -36,5 +36,7 @@ declare module '@deepseek-ai/dsh-llm' {
 /**
  * 安装"路由切换 → 工具面说明"注入。
  * @param ctx - 插件上下文(session/event 与 agent/pre-step 两个事件面)。
+ * @param nativeToolsOf - 读取当前放行的 CLI 内置工具名(设置页开关,渲染时现取,
+ *   保证说明与 spawn 的 `--tools` 一致)。
  */
-export declare function installModelSwitchToolGuide(ctx: Context): void;
+export declare function installModelSwitchToolGuide(ctx: Context, nativeToolsOf?: () => readonly string[]): void;

@@ -81,6 +81,14 @@ export interface PumpHost {
      * MCP server、不发 delegate 注册;delegate = 旧 DelegateTool 通道。
      */
     bridgeMode?: 'mcp' | 'delegate';
+    /**
+     * 额外放行的 CLI 内置工具名(设置页开关;默认空 = 内置工具全禁)。
+     *
+     * 用 thunk 而非数组:设置在面板里可随时改,每次 spawn 现取——否则改了
+     * 开关要重启 dsh 才生效。`--tools` 是全量白名单,放行项必须与
+     * {@link cliToolPolicyArgs} 的拼装保持一致。
+     */
+    nativeToolsOf?: () => readonly string[];
     /** 推理强度(--effort;未选则不传,保持 CLI 默认)。 */
     reasoningEffort?: string;
     timeouts?: AcpTimeouts;

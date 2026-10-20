@@ -20,8 +20,11 @@ export declare const CONTINUE_PROMPT = "\u7EE7\u7EED\u5B8C\u6210\u4E4B\u524D\u67
  * (见 adapter 的 systemHash),重复发送时不加标题会让模型当成两条并行指令。
  * @param system - system prompt 全文。
  * @param updated - 是否是对已发过版本的更新(内容变了才为 true)。
+ * @param bridgeMode - 桥接模式(决定 dsh 侧工具命名前缀)。
+ * @param nativeTools - 已放行的 CLI 内置工具名(与 spawn 的 --tools 保持一致;
+ *   两者不一致会让模型拿到互相矛盾的指令)。
  */
-export declare function systemInstructionsText(system: string, updated?: boolean, bridgeMode?: 'mcp' | 'delegate'): string;
+export declare function systemInstructionsText(system: string, updated?: boolean, bridgeMode?: 'mcp' | 'delegate', nativeTools?: readonly string[]): string;
 /** 序列化结果:prompt 文本 + ACP 原生图片内容块(base64)。 */
 export interface SerializedPrompt {
     prompt: string;

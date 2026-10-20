@@ -60,8 +60,17 @@ export declare const DEFAULT_ACP_RUN_TIMEOUTS: {
  *
  * 版本升级若新增内置工具:默认不可见(比"漏禁"安全),不再逐个维护白名单。
  * 逃生口:用户 `extraArgs` 排在 `--tools` 之后,可用 `--tools Read` 覆盖本策略。
+ *
+ * **逐项放行(设置页开关,`cliNativeTools`)**:`--tools` 是全量白名单而不是
+ * 增量黑名单——CLI 侧 `createIsEnabledChecker` 对每个工具做 `split(',')` 精确
+ * 匹配,不匹配即 `isEnabled=false`。所以放行一个内置工具时必须把仍要保留的
+ * 名字一并列出(delegate 模式的 `DelegateTool` 尤其不能漏,漏了全部桥工具消失)。
+ * MCP 工具不在该判定内(`--tools ''` 时 `mcp__dsh__*` 仍可调用,见 CLI 日志),
+ * 故不需要列进来。
+ * @param bridgeMode - 桥接模式(delegate 恒带 `DelegateTool`)。
+ * @param nativeTools - 额外放行的 CLI 内置工具名(空 = 维持全禁策略)。
  */
-export declare function cliToolPolicyArgs(bridgeMode?: 'mcp' | 'delegate' | undefined): string[];
+export declare function cliToolPolicyArgs(bridgeMode?: 'mcp' | 'delegate' | undefined, nativeTools?: readonly string[]): string[];
 /** 动态空闲超时预算(测试注入小值压缩时间)。 */
 export interface AcpTimeouts {
     firstMs?: number;

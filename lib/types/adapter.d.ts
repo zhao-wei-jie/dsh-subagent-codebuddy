@@ -61,6 +61,11 @@ export interface CodebuddyAdapterOptions {
      * HTTP MCP server;delegate = 旧 DelegateTool 通道(不加该参数)。
      */
     bridgeMode?: 'mcp' | 'delegate';
+    /**
+     * 额外放行的 CLI 内置工具名(设置页开关;空 = 内置工具全禁)。
+     * thunk:每次 spawn 与每次 system 说明渲染都现取,面板改动即时生效。
+     */
+    nativeToolsOf?: () => readonly string[];
     /** 动态空闲超时预算(可选,默认见 {@link DEFAULT_ACP_RUN_TIMEOUTS})。 */
     timeouts?: AcpTimeouts;
     /** 静默失败自动重试次数(默认 2:首次 + 1 次续跑)。 */
