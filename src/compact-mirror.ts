@@ -116,7 +116,16 @@ interface MirrorSession {
   append: (
     type: string,
     data: unknown,
-    opts?: { surfaceOp?: unknown; sourceEventSeqs?: readonly number[] },
+    opts?: {
+      /**
+       * 会话层的 replace 标记。字段名**必须是** `startSeq`/`endSeq`
+       * (`assertSurfaceOp` 的 `isReplaceOp` 只认这三个键),写成 `start`/`end`
+       * 会被判为 `invalid replace surfaceOp` 而抛错——这里收窄成判别联合,
+       * 就是为了让这类错误在编译期暴露,而不是等到运行时被 catch 吞掉。
+       */
+      surfaceOp?: 'append' | { op: 'replace'; startSeq: number; endSeq: number }
+      sourceEventSeqs?: readonly number[]
+    },
   ) => { readonly seq: number }
 }
 
@@ -126,6 +135,7 @@ interface MirrorEvent {
   readonly seq: number
   readonly data?: {
     readonly compactionId?: unknown
+    readonly turn?: number | null
     readonly message?: { readonly content?: readonly MirrorBlock[] }
   }
 }
@@ -331,7 +341,11 @@ function appendMirroredCompaction(
   turn: number | null,
   summaryText: string,
 ): boolean {
-  if (hasOpenCompaction(session)) return false
+  // 历史遗留的未闭合事务(上次进程被强杀、或旧版把 checkpoint 写错导致 end 从未
+  // 执行):dsh 会把它投影成一条常驻 "running" 的压缩请求,该会话下次启动就打不开。
+  // 这里补一条 `compaction/end` 自愈,而不是静默跳过——跳过只会让它一直留着。
+  if (!healDanglingCompaction(session)) return false
+
   const meter = deps.ctx.get('tokenMeter') as MeterFace | undefined
   if (meter?.measure === undefined) return false
   const range = selectMirrorRange(session, meter)
@@ -347,22 +361,8 @@ function appendMirroredCompaction(
   const compactionId = randomUUID()
   const header = session.requestHeader?.()?.config
   const lifecycle = { compactionId, turn }
-  const startEvent = session.append('compaction/start', lifecycle)
-  const summaryEvent = session.append('compaction/summary', {
-    compactionId,
-    summary: [{ type: 'text', text: summaryText }],
-    shadowedRange: { start: range.start, end: range.end },
-    shadowedSeqs: range.shadowedSeqs,
-    shadowedTokenCount: range.shadowedTokenCount,
-    provider: header?.provider ?? deps.providerName,
-    model: header?.model ?? 'unknown',
-  })
-  // checkpoint 必须与 dsh 原生压缩逐字同形:
-  // - createUserMessage 带 role:'user' 与稳定 id(会话层校验 user/message 形状);
-  // - source 带 compact-checkpoint 标记(0.2.1 起 UI 与序列化层靠这个 kind
-  //   识别压缩卡/压缩边界,旧 `{ kind:'plugin', plugin:'compact' }` 已退役);
-  // - sourceEventSeqs 必须覆盖每一个被遮蔽节点(会话层强校验),写法与
-  //   region.ts 一致:[startSeq, summarySeq, ...shadowedSeqs]。
+  // 可能抛错的部分(createUserMessage 的会话层校验)全部提前到写 start 之前:
+  // append 是即时落盘、没有事务,写了一半才失败就会留下未闭合 compaction。
   const checkpoint = createUserMessage({
     content: [
       { type: 'text', text: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}` },
@@ -373,26 +373,105 @@ function appendMirroredCompaction(
     // 该包升级改名时这里要靠会话迁移表 RENAMED_PRODUCERS 同步。
     source: { kind: 'compact-checkpoint', compactionId },
   } as never)
-  session.append('user/message', checkpoint, {
-    surfaceOp: { op: 'replace', start: range.start, end: range.end },
-    sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...range.shadowedSeqs],
-  })
+
+  const startEvent = session.append('compaction/start', lifecycle)
+  try {
+    const summaryEvent = session.append('compaction/summary', {
+      compactionId,
+      summary: [{ type: 'text', text: summaryText }],
+      shadowedRange: { start: range.start, end: range.end },
+      shadowedSeqs: range.shadowedSeqs,
+      shadowedTokenCount: range.shadowedTokenCount,
+      provider: header?.provider ?? deps.providerName,
+      model: header?.model ?? 'unknown',
+    })
+    // checkpoint 必须与 dsh 原生压缩逐字同形:
+    // - source 带 compact-checkpoint 标记(0.2.1 起 UI 与序列化层靠这个 kind
+    //   识别压缩卡/压缩边界,旧 `{ kind:'plugin', plugin:'compact' }` 已退役);
+    // - surfaceOp 用 `startSeq`/`endSeq`(不是 start/end;见 MirrorSession.append);
+    // - sourceEventSeqs 必须覆盖每一个被遮蔽节点(会话层强校验),写法与
+    //   region.ts 一致:[startSeq, summarySeq, ...shadowedSeqs]。
+    session.append('user/message', checkpoint, {
+      surfaceOp: { op: 'replace', startSeq: range.start, endSeq: range.end },
+      sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...range.shadowedSeqs],
+    })
+  } catch (error) {
+    // 事务已经开了头(start 落盘),半途失败必须闭合:dsh 把未闭合的 compaction
+    // 投影成常态 "running" 的请求,该会话**下次启动打不开**。dsh 原生压缩也是
+    // "每次失败恰好补一次 compaction/end",这里同款处理。
+    closeCompactionQuietly(session, { compactionId, turn }, error)
+    throw error
+  }
   session.append('compaction/end', lifecycle)
   return true
 }
 
 /**
- * 是否已有未闭合的压缩事务(有就别再开一个,dsh 的日志不变量禁止嵌套)。
+ * 给未闭合的压缩事务补一条 `compaction/end`(自愈)。
+ *
+ * 只在**内存里还有那个开关**时有效——所以它救不了"已经写坏在磁盘上"的会话
+ * (那要靠 `fix-session.cjs`),但能接住进程被强杀、以及任何未来回归导致的半截事务。
+ * @param session - 目标会话。
+ * @returns 是否可以安全地开一个新事务;false 表示旧事务没能关掉(禁止嵌套)。
+ */
+function healDanglingCompaction(session: MirrorSession): boolean {
+  const dangling = danglingCompaction(session)
+  if (dangling === null) return true
+  // 连 compactionId 都读不到就没法补 end(畸形/旧格式);此时宁可不镜像,也不嵌套。
+  if (dangling.compactionId === null) {
+    console.warn(`${LOG_TAG} 有未闭合的压缩事务但读不到 compactionId,本次不做镜像`)
+    return false
+  }
+  const closed = closeCompactionQuietly(
+    session,
+    { compactionId: dangling.compactionId, turn: dangling.turn },
+    new Error('镜像压缩事务未闭合(上次写入中断),已自动关闭'),
+  )
+  return closed
+}
+
+/** 补写 `compaction/end`;连它都写不进去就只能记日志,绝不再抛。 */
+function closeCompactionQuietly(
+  session: MirrorSession,
+  lifecycle: { compactionId: string; turn: number | null },
+  error: unknown,
+): boolean {
+  try {
+    session.append('compaction/end', {
+      compactionId: lifecycle.compactionId,
+      turn: lifecycle.turn,
+      // 会话层要求 error 是字符串(dsh 原生 compaction/end 的 data 形状)。
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return true
+  } catch (closeError) {
+    console.warn(`${LOG_TAG} 补写 compaction/end 失败: `
+      + (closeError instanceof Error ? closeError.message : String(closeError)))
+    return false
+  }
+}
+
+/**
+ * 取最近一个未闭合压缩事务的 id 与 turn;没有未闭合事务则 null。
+ * id 读不到时返回 `{ compactionId: null }`(调用方据此拒绝开新事务)。
  * 从日志尾部倒着扫,遇到第一个压缩事件即可判定——不必每次走完整本日志。
  */
-function hasOpenCompaction(session: MirrorSession): boolean {
+function danglingCompaction(
+  session: MirrorSession,
+): { compactionId: string | null; turn: number | null } | null {
   const events = session.snapshotEvents?.() ?? []
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    const type = events[index]!.type
-    if (type === 'compaction/start') return true
-    if (type === 'compaction/end') return false
+    const event = events[index]!
+    if (event.type === 'compaction/end') return null
+    if (event.type !== 'compaction/start') continue
+    const id = event.data?.compactionId
+    const turn = event.data?.turn
+    return {
+      compactionId: typeof id === 'string' ? id : null,
+      turn: typeof turn === 'number' ? turn : null,
+    }
   }
-  return false
+  return null
 }
 
 /**

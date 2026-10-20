@@ -52,6 +52,10 @@ interface FakeEvent {
   toolCalls?: number
   /** 标记为压缩生命周期事件(用于"已有未闭合事务"用例)。 */
   lifecycle?: 'start' | 'end'
+  /** 压缩事务 id(未闭合事务自愈用例要读它)。 */
+  compactionId?: string
+  /** 事务归属的回合。 */
+  turn?: number | null
 }
 
 interface Harness {
@@ -73,20 +77,30 @@ interface HarnessOptions {
   surfaceTokens?: number
   provider?: string
   store?: ConversationStore
+  /** 在 append 落盘**之前**调用(抛错即模拟会话层拒绝该事件)。 */
+  onAppend?: (type: string) => void
 }
 
 /** 把一条 FakeEvent 转成镜像读到的形状。 */
 function asEvent(event: FakeEvent): {
   type: string
   seq: number
-  data: { message: { content: Array<{ type: string }> } }
+  data: {
+    compactionId?: string
+    turn?: number | null
+    message: { content: Array<{ type: string }> }
+  }
 } {
   return {
     type: event.lifecycle === 'start' ? 'compaction/start'
       : event.lifecycle === 'end' ? 'compaction/end'
         : event.type,
     seq: event.seq,
-    data: { message: { content: Array.from({ length: event.toolCalls ?? 0 }, () => ({ type: 'tool-call' })) } },
+    data: {
+      ...(event.compactionId === undefined ? {} : { compactionId: event.compactionId }),
+      ...(event.turn === undefined ? {} : { turn: event.turn }),
+      message: { content: Array.from({ length: event.toolCalls ?? 0 }, () => ({ type: 'tool-call' })) },
+    },
   }
 }
 
@@ -110,6 +124,7 @@ function makeHarness(options: HarnessOptions): Harness {
       return event === undefined ? undefined : asEvent(event)
     },
     append: (type: string, data: unknown, opts?: { surfaceOp?: unknown; sourceEventSeqs?: readonly number[] }) => {
+      options.onAppend?.(type)
       appended.push({ type, data: data as Record<string, unknown>, surfaceOp: opts?.surfaceOp, sourceEventSeqs: opts?.sourceEventSeqs })
       return { seq: appended.length }
     },
@@ -203,9 +218,9 @@ describe('registerCompactMirror:把 CLI 的压缩镜像成 dsh 压缩事务', ()
     expect(summary!.data['llmStreamCall']).toBeUndefined()
     expect(summary!.data['rawOutput']).toBeUndefined()
     expect(summary!.data['provider']).toBe('codebuddy')
-    // checkpoint 必须带 replace + compact-checkpoint 来源标记,UI 才认它是压缩卡。
+    // checkpoint 必须带 replace(字段名 startSeq/endSeq)+ compact-checkpoint 来源标记。
     expect(checkpoint!.data['source']).toEqual({ kind: 'compact-checkpoint', compactionId })
-    expect(checkpoint!.surfaceOp).toEqual({ op: 'replace', start: 1, end: 2 })
+    expect(checkpoint!.surfaceOp).toEqual({ op: 'replace', startSeq: 1, endSeq: 2 })
     expect(JSON.stringify(checkpoint!.data['content'])).toContain('automatically generated checkpoint')
     expect(end!.data['compactionId']).toBe(compactionId)
     expect(harness.infos.some(message => message.includes('未消耗 token'))).toBe(true)
@@ -258,9 +273,10 @@ describe('registerCompactMirror:把 CLI 的压缩镜像成 dsh 压缩事务', ()
     // seq1 是 system/message,必须整体让开:区间从 seq2 开始。
     expect(summary?.data['shadowedSeqs']).toEqual([2, 3, 4])
     expect(summary?.data['shadowedRange']).toEqual({ start: 2, end: 4 })
-    // checkpoint 的 surfaceOp 必须与 summary 的区间一致(否则会话层强校验报错)。
+    // checkpoint 的 surfaceOp 必须与 summary 的区间一致,且字段名是
+    // startSeq/endSeq(会话层 isReplaceOp 只认这三个键)。
     const checkpoint = harness.appended.find(entry => entry.type === 'user/message')
-    expect(checkpoint?.surfaceOp).toEqual({ op: 'replace', start: 2, end: 4 })
+    expect(checkpoint?.surfaceOp).toEqual({ op: 'replace', startSeq: 2, endSeq: 4 })
   })
 
   it('system head 占满可压区间时放弃镜像(宁可不压,也不写坏日志)', async () => {
@@ -282,6 +298,67 @@ describe('registerCompactMirror:把 CLI 的压缩镜像成 dsh 压缩事务', ()
 
     // 保留量 1296 > 尾部 100 → 选段会一路退到 system head,只能整体放弃。
     expect(harness.appended).toEqual([])
+  })
+
+  it('checkpoint 的 surfaceOp 用 startSeq/endSeq(会话层 isReplaceOp 只认这三个键)', async () => {
+    const harness = makeHarness(MINIMAL)
+    await harness.fire()
+    writeRecord(periodicSummary('s'))
+    await harness.fire()
+
+    // 曾经写成 { op:'replace', start, end } → 会话层判 invalid replace surfaceOp
+    // 抛错,被 mirrorQuietly 吞掉,于是 start 永无 end、会话下次启动打不开。
+    const checkpoint = harness.appended.find(entry => entry.type === 'user/message')
+    expect(Object.keys(checkpoint!.surfaceOp as object).sort()).toEqual(['endSeq', 'op', 'startSeq'])
+  })
+
+  it('checkpoint 被会话层拒绝时补写 compaction/end(否则该会话下次启动打不开)', async () => {
+    const harness = makeHarness({
+      ...MINIMAL,
+      onAppend: (type) => {
+        if (type === 'user/message') {
+          throw new Error('session event "user/message" carries an invalid replace surfaceOp')
+        }
+      },
+    })
+    await harness.fire()
+    writeRecord(periodicSummary('s'))
+    await harness.fire()
+
+    // start 已落盘 → 事务必须闭合:dsh 把未闭合的压缩投影成常驻 "running" 请求。
+    expect(harness.appended.map(entry => entry.type))
+      .toEqual(['compaction/start', 'compaction/summary', 'compaction/end'])
+    const start = harness.appended[0]!
+    const end = harness.appended[2]!
+    expect(end.data['compactionId']).toBe(start.data['compactionId'])
+    // 会话层要求 compaction/end 的 error 是字符串。
+    expect(typeof end.data['error']).toBe('string')
+    expect(String(end.data['error'])).toContain('invalid replace surfaceOp')
+    expect(harness.warns.some(message => message.includes('镜像 CLI 压缩失败'))).toBe(true)
+  })
+
+  it('历史遗留的未闭合事务先补 end 自愈,再做本次镜像', async () => {
+    const harness = makeHarness({
+      events: [
+        { seq: 1, type: 'user/message' },
+        { seq: 2, type: 'assistant/message' },
+        { seq: 3, type: 'tool/result' },
+        // 上次写入中断留下的半截事务(磁盘上真实存在的形态)。
+        { seq: 4, type: 'compaction/start', lifecycle: 'start', compactionId: 'dangling-id', turn: 6 },
+      ],
+      surface: [1, 2, 3],
+      nodes: [1, 2, 3].map(seq => ({ seq, tokens: 100, heuristicTokens: 100 })),
+      totalTokens: 300,
+    })
+    await harness.fire()
+    writeRecord(periodicSummary('s'))
+    await harness.fire()
+
+    expect(harness.appended[0]?.type).toBe('compaction/end')
+    expect(harness.appended[0]?.data['compactionId']).toBe('dangling-id')
+    expect(harness.appended[0]?.data['turn']).toBe(6)
+    expect(harness.appended.slice(1).map(entry => entry.type))
+      .toEqual(['compaction/start', 'compaction/summary', 'user/message', 'compaction/end'])
   })
 
   it('首次见到会话时跳到文件末尾:不回放历史压缩', async () => {
@@ -330,9 +407,10 @@ describe('registerCompactMirror:把 CLI 的压缩镜像成 dsh 压缩事务', ()
     expect(harness.appended).toEqual([])
   })
 
-  it('已有未闭合的压缩事务 → 不再开一个(dsh 日志不变量禁止嵌套)', async () => {
+  it('已有未闭合事务且读不到 compactionId → 不开新事务(dsh 日志不变量禁止嵌套)', async () => {
     const harness = makeHarness({
       ...MINIMAL,
+      // 畸形/旧格式:start 上没有 compactionId,补不了 end。
       events: [{ seq: 1, type: 'user/message' }, { seq: 2, type: 'compaction', lifecycle: 'start' }],
     })
     await harness.fire()
