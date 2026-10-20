@@ -236,6 +236,54 @@ describe('registerCompactMirror:把 CLI 的压缩镜像成 dsh 压缩事务', ()
     expect(summary?.data['shadowedTokenCount']).toBe(40)
   })
 
+  it('受保护的 system head 不参与遮蔽(遮住它会让会话下次启动打不开)', async () => {
+    const harness = makeHarness({
+      events: [
+        { seq: 1, type: 'system/message' },
+        { seq: 2, type: 'user/message' },
+        { seq: 3, type: 'assistant/message' },
+        { seq: 4, type: 'user/message' },
+        { seq: 5, type: 'assistant/message' },
+      ],
+      surface: [1, 2, 3, 4, 5],
+      nodes: [1, 2, 3, 4, 5].map(seq => ({ seq, tokens: 100, heuristicTokens: 100 })),
+      totalTokens: 500,
+    })
+    await harness.fire()
+    writeRecord(periodicSummary('s'))
+    await harness.fire()
+
+    const summary = harness.appended.find(entry => entry.type === 'compaction/summary')
+    // 保留量 = floor(500*0.16) = 80 → 尾部从 seq5 起;头部只剩 1..4。
+    // seq1 是 system/message,必须整体让开:区间从 seq2 开始。
+    expect(summary?.data['shadowedSeqs']).toEqual([2, 3, 4])
+    expect(summary?.data['shadowedRange']).toEqual({ start: 2, end: 4 })
+    // checkpoint 的 surfaceOp 必须与 summary 的区间一致(否则会话层强校验报错)。
+    const checkpoint = harness.appended.find(entry => entry.type === 'user/message')
+    expect(checkpoint?.surfaceOp).toEqual({ op: 'replace', start: 2, end: 4 })
+  })
+
+  it('system head 占满可压区间时放弃镜像(宁可不压,也不写坏日志)', async () => {
+    const harness = makeHarness({
+      events: [
+        { seq: 1, type: 'system/message' },
+        { seq: 2, type: 'user/message' },
+      ],
+      surface: [1, 2],
+      nodes: [
+        { seq: 1, tokens: 8000, heuristicTokens: 8000 },
+        { seq: 2, tokens: 100, heuristicTokens: 100 },
+      ],
+      totalTokens: 8100,
+    })
+    await harness.fire()
+    writeRecord(periodicSummary('s'))
+    await harness.fire()
+
+    // 保留量 1296 > 尾部 100 → 选段会一路退到 system head,只能整体放弃。
+    expect(harness.appended).toEqual([])
+  })
+
   it('首次见到会话时跳到文件末尾:不回放历史压缩', async () => {
     writeRecord(periodicSummary('很久以前压的'))
     const harness = makeHarness(MINIMAL)
