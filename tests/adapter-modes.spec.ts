@@ -1146,6 +1146,88 @@ describe('真工具直发(delegate → dsh 原生工具/卡片)', () => {  it('d
     settleFn?.()
   }, 15_000)
 
+  it('dispatchMcpCall:0.2.1 结构(message.content 直接是结果块)取到真实文本,不回落 (no output)', async () => {
+    // 现场(2026-10-20):dsh ≥0.2.1 把工具结果作为独立 `role: 'tool'` 消息写出,
+    // content **直接是结果块**(无 `tool-result` 包装)。泵按旧结构读 block.content
+    // → 空数组 → blocksToText 兜底成 "(no output)",CLI 的模型收到的就是这个
+    // 占位符(命令实际已成功执行)。本用例锁死新结构。
+    const h = makeAdapter({}, { ...FAST, maxAttempts: 1, tailQuietMs: 5_000 })
+    let settleFn: (() => void) | undefined
+    mockTurn((c) => {
+      settleFn = () => c.settle()
+      c.p.update(message('段一'))
+      c.p.update(toolCall('call_mcp_a', 'Bash', { command: 'echo hi' }))
+      c.p.update(phase('tool_executing'))
+      c.p.update(toolUpdate('call_mcp_a', 'completed', 'hi'))
+    })
+    await step(h.adapter, makeOptions('s1'))
+    const pump = TurnPump.forSession('s1')!
+    const pending = pump.dispatchMcpCall('bash', { command: 'echo hi' })
+    const second = await step(h.adapter, makeOptions('s1'))
+    const chunk = second.find(c => c.includes('"name":"bash"') && c.includes('mcp_'))
+    const callId = (JSON.parse(chunk!) as { block: { id: string } }).block.id
+    h.emitSessionEvent({
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 2,
+        message: {
+          role: 'tool',
+          source: { kind: 'tool', callId },
+          toolCallId: callId,
+          content: [{ type: 'text', text: 'hi' }],
+          isError: false,
+        },
+      },
+    })
+    await expect(pending).resolves.toEqual({
+      output: 'hi',
+      isError: false,
+      content: [{ type: 'text', text: 'hi' }],
+    })
+    settleFn?.()
+  }, 15_000)
+
+  it('dispatchMcpCall:0.2.1 结构的 message.isError 生效(失败不回成 success)', async () => {
+    // isError 在**消息**上,结果块上没有。只读块会把失败报成功——CLI 的模型
+    // 于是以为命令已生效并据此继续(比空输出更危险)。
+    const h = makeAdapter({}, { ...FAST, maxAttempts: 1, tailQuietMs: 5_000 })
+    let settleFn: (() => void) | undefined
+    mockTurn((c) => {
+      settleFn = () => c.settle()
+      c.p.update(message('段一'))
+      c.p.update(toolCall('call_mcp_b', 'Bash', { command: 'false' }))
+      c.p.update(phase('tool_executing'))
+      c.p.update(toolUpdate('call_mcp_b', 'failed', 'boom'))
+    })
+    await step(h.adapter, makeOptions('s1'))
+    const pump = TurnPump.forSession('s1')!
+    const pending = pump.dispatchMcpCall('bash', { command: 'false' })
+    const second = await step(h.adapter, makeOptions('s1'))
+    const chunk = second.find(c => c.includes('"name":"bash"') && c.includes('mcp_'))
+    const callId = (JSON.parse(chunk!) as { block: { id: string } }).block.id
+    h.emitSessionEvent({
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 2,
+        message: {
+          role: 'tool',
+          source: { kind: 'tool', callId },
+          toolCallId: callId,
+          content: [{ type: 'text', text: 'boom' }],
+          isError: true,
+        },
+      },
+    })
+    await expect(pending).resolves.toEqual({
+      output: 'boom',
+      isError: true,
+      content: [{ type: 'text', text: 'boom' }],
+    })
+    settleFn?.()
+  }, 15_000)
+
   it('dispatchMcpCall 超时后结果迟到:经投递口补投(交互式工具答案不丢)', async () => {
     // 现场(2026-09-16):ask_user_question 等真人作答超过转发兜底窗口 → 分发拒绝、
     // CLI 收到超时错误并重问同一题;用户后来提交的答案没有通道可投,永久丢失

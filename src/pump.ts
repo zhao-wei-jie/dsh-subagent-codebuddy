@@ -110,23 +110,85 @@ export function watchLateMcpResult(
     if (event?.type !== 'tool/result') return
     const sid = typeof session?.header?.id === 'string' ? session.header.id : session?.id
     if (sid !== sessionId) return
-    const message = (event.data as {
-      message?: {
-        source?: { callId?: unknown }
-        content?: readonly { toolCallId?: unknown; content?: readonly unknown[] }[]
-      }
-    } | undefined)?.message
+    const message = (event.data as { message?: ToolResultMessageLike } | undefined)?.message
     const block = message?.content?.[0]
-    const cid = typeof block?.toolCallId === 'string'
-      ? block.toolCallId
-      : (typeof message?.source?.callId === 'string' ? message.source.callId : undefined)
-    if (cid !== callId) return
+    if (toolCallIdOf(block, message) !== callId) return
     done = true
     off?.()
-    sink?.(toolName, blocksToText(Array.isArray(block?.content) ? block.content as readonly unknown[] : []))
+    sink?.(toolName, blocksToText(resultBlocksOf(block, message)))
   })
   const timer = setTimeout(() => { done = true; off?.() }, ttlMs)
   timer.unref?.()
+}
+
+/** tool/result 消息里结果块的形态(0.2.1 结构与旧包装结构的公共最小集)。 */
+interface ToolResultBlockLike {
+  toolCallId?: unknown
+  content?: readonly unknown[]
+  isError?: unknown
+}
+
+/** tool/result 事件的消息体(结果块 + 失败标记的两种落点)。 */
+interface ToolResultMessageLike {
+  toolCallId?: unknown
+  source?: { callId?: unknown }
+  content?: readonly ToolResultBlockLike[]
+  isError?: unknown
+}
+
+/**
+ * 工具结果的正文块。
+ *
+ * dsh ≥0.2.1 把工具结果作为独立的 `role: 'tool'` 消息写进时间线,其
+ * `content` **直接就是结果块数组**(`[{type:'text',text}]`、`[{type:'image',...}]`);
+ * 旧结构则把结果块再包一层 `{type:'tool-result',content:[...]}`。两种都认——
+ * 只认后者会让所有转发回 CLI 的结果取到空数组,最终被 `blocksToText` 兜底成
+ * `(no output)`(实测症状:模型收到的字面值就是 `(no output)`,命令明明成功)。
+ *
+ * **先看块、再看消息**:旧结构下 `message.content[0]` 是包装块,不解包就会把
+ * 包装块原样回给 MCP 端点(端点虽能递归展开,但契约是结果块,单测也按此断言)。
+ * @param block - `message.content[0]`(旧结构下是包装块)。
+ * @param message - tool/result 的消息体。
+ * @returns 结果块数组(可能为空——真空结果仍由 `blocksToText` 兜底)。
+ */
+function resultBlocksOf(
+  block: ToolResultBlockLike | undefined,
+  message: ToolResultMessageLike | undefined,
+): readonly unknown[] {
+  if (Array.isArray(block?.content) && block.content.length > 0) return block.content
+  if (Array.isArray(message?.content) && message.content.length > 0) return message.content
+  return []
+}
+
+/**
+ * 工具结果是否失败。
+ *
+ * 0.2.1 起 `isError` 在**消息**上(结果块本身没有这个字段),只读块会让失败的
+ * 工具被回成 success——比空输出更危险:CLI 的模型会以为命令已生效并据此继续。
+ * @param block - `message.content[0]`。
+ * @param message - tool/result 的消息体。
+ * @returns 任一层标记失败即为失败。
+ */
+function isErrorResult(
+  block: ToolResultBlockLike | undefined,
+  message: ToolResultMessageLike | undefined,
+): boolean {
+  return message?.isError === true || block?.isError === true
+}
+
+/**
+ * tool/result 消息的 callId。
+ *
+ * 0.2.1 起在消息顶层(`message.toolCallId`),旧结构在包装块上;`source.callId`
+ * 作为最后兜底——它只是"恰好也带着",不是结构约定。
+ */
+function toolCallIdOf(
+  block: ToolResultBlockLike | undefined,
+  message: ToolResultMessageLike | undefined,
+): string | undefined {
+  if (typeof message?.toolCallId === 'string') return message.toolCallId
+  if (typeof block?.toolCallId === 'string') return block.toolCallId
+  return typeof message?.source?.callId === 'string' ? message.source.callId : undefined
 }
 
 /** 工具结果(ACP 报来的原始形态)。 */
@@ -1381,16 +1443,9 @@ export class TurnPump {
       return
     }
     if (event?.type !== 'tool/result') return
-    const message = (event.data as {
-      message?: {
-        source?: { callId?: unknown }
-        content?: readonly { toolCallId?: unknown; content?: readonly unknown[]; isError?: unknown }[]
-      }
-    } | undefined)?.message
+    const message = (event.data as { message?: ToolResultMessageLike } | undefined)?.message
     const block = message?.content?.[0]
-    const callId = typeof block?.toolCallId === 'string'
-      ? block.toolCallId
-      : (typeof message?.source?.callId === 'string' ? message.source.callId : undefined)
+    const callId = toolCallIdOf(block, message)
     if (callId === undefined) return
     // MCP 转发调用:结果回填 MCP 响应(先于 delegate 通道匹配)。
     const mcpWaiter = this.mcpWaiters.get(callId)
@@ -1398,10 +1453,10 @@ export class TurnPump {
       this.mcpWaiters.delete(callId)
       // content 原样回传:MCP 端点据此把图片块转成 MCP image 内容块(纯文本
       // 时端点仍用 output,逐字与历史一致)。
-      const content = Array.isArray(block?.content) ? block.content as readonly unknown[] : []
+      const content = resultBlocksOf(block, message)
       mcpWaiter.resolve({
         output: blocksToText(content),
-        isError: block?.isError === true,
+        isError: isErrorResult(block, message),
         content,
       })
       return
@@ -1411,15 +1466,15 @@ export class TurnPump {
     const late = this.lateMcpCalls.get(callId)
     if (late !== undefined) {
       this.lateMcpCalls.delete(callId)
-      late.sink?.(late.name, blocksToText(Array.isArray(block?.content) ? block.content as readonly unknown[] : []))
+      late.sink?.(late.name, blocksToText(resultBlocksOf(block, message)))
       return
     }
     const waiter = this.delegateWaiters.get(callId)
     if (waiter !== undefined) {
       this.delegateWaiters.delete(callId)
       waiter.resolve({
-        output: blocksToText(Array.isArray(block?.content) ? block.content as readonly unknown[] : []),
-        isError: block?.isError === true,
+        output: blocksToText(resultBlocksOf(block, message)),
+        isError: isErrorResult(block, message),
       })
       return
     }
@@ -1431,8 +1486,8 @@ export class TurnPump {
     if (call === undefined || call.rawName !== 'delegate_tool') return
     // 结果先到(loop 执行快、delegateTool 请求稍后才来):缓存,认领时取走。
     this.delegateResults.set(callId, {
-      output: blocksToText(Array.isArray(block?.content) ? block.content as readonly unknown[] : []),
-      isError: block?.isError === true,
+      output: blocksToText(resultBlocksOf(block, message)),
+      isError: isErrorResult(block, message),
     })
   }
 
